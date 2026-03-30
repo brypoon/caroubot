@@ -6,6 +6,9 @@ dist/
 wheels/
 *.egg-info
 downloaded_files/
+monitor.log
+seen_items.json
+
 # Virtual environments
 .venv
 
