@@ -8,12 +8,9 @@ from seleniumbase import Driver
 from selenium.webdriver.common.by import By
 
 # --- CONFIGURATION ---
+load_dotenv()
 URL = os.getenv("URL")
-CHECK_INTERVAL_RANGE = (20, 40) 
-
-def notify_mac(title, text):
-    cmd = f'''display notification "{text}" with title "{title}"'''
-    subprocess.call(['osascript', '-e', cmd])
+CHECK_INTERVAL_RANGE = (20, 40) # Random delay between checks (20-40 seconds)
 
 # --- TELEGRAM CONFIG ---
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -31,6 +28,10 @@ def notify_telegram(text):
         requests.post(url, json=payload, timeout=10)
     except Exception as e:
         print(f"[!] Telegram error: {e}")
+
+def notify_mac(title, text):
+    cmd = f'''display notification "{text}" with title "{title}"'''
+    subprocess.call(['osascript', '-e', cmd])
 
 def clean_url(url):
     if not url:
