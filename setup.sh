@@ -26,10 +26,6 @@ Environment=PYTHONUNBUFFERED=1x
 WantedBy=multi-user.target
 EOF
 
-echo "Reloading systemd daemon..."
-sudo systemctl daemon-reexec
-sudo systemctl daemon-reload
-
 echo "Creating .env file..."
 tee ./.env <<EOF
 URL=carousell_search_url
