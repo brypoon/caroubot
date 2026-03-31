@@ -1,5 +1,8 @@
 curl -LsSf https://astral.sh/uv/install.sh | sh
+sudo cp ~/.local/bin/uv /usr/local/bin/uv
+sudo chmod +x /usr/local/bin/uv
 uv sync
+playwright install --with-deps
 
 echo "Setting up systemd service..."
 sudo tee /etc/systemd/system/caroubot.service <<EOF
@@ -7,23 +10,17 @@ sudo tee /etc/systemd/system/caroubot.service <<EOF
 Description=Carousell Monitor Bot
 After=network.target
 
-USER_NAME=$(whoami)
-WORK_DIR=$(pwd)
-
 [Service]
 Type=simple
-User=${USER_NAME}
-WorkingDirectory=${WORK_DIR}
-ExecStart=uv run ${WORK_DIR}/main.py
+User=$(whoami)
+WorkingDirectory=$(pwd)
+ExecStart=/usr/local/bin/uv run $(pwd)/main.py
 
 Restart=always
 RestartSec=5
 
 # Ensures logs flush immediately
-Environment=PYTHONUNBUFFERED=1
-
-# Optional: load .env manually if needed
-EnvironmentFile=/home/ec2-user/carousell-bot/.env
+Environment=PYTHONUNBUFFERED=1x
 
 [Install]
 WantedBy=multi-user.target
@@ -41,3 +38,4 @@ CHAT_ID=your_telegram_chat_id
 EOF
 
 echo "Setup complete. Please edit the .env file with your actual values."
+chmod u+x start.sh

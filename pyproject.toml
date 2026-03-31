@@ -10,5 +10,6 @@ dependencies = [
     "webdriver-manager==4.0.2",
     "setuptools==82.0.1",
     "seleniumbase==4.47.4",
-    "python-dotenv==1.2.2"
+    "python-dotenv==1.2.2",
+    "playwright==1.58.0"
 ]

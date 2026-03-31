@@ -30,11 +30,9 @@ formatter = logging.Formatter(
     "%(asctime)s - %(levelname)s - %(message)s"
 )
 
-# File handler (rotates at 5MB, keeps 3 backups)
 file_handler = RotatingFileHandler(LOG_FILE, maxBytes=5*1024*1024, backupCount=3)
 file_handler.setFormatter(formatter)
 
-# Console handler (optional, remove if running as service)
 console_handler = logging.StreamHandler()
 console_handler.setFormatter(formatter)
 
@@ -42,8 +40,18 @@ logger.addHandler(file_handler)
 logger.addHandler(console_handler)
 
 
+# ✅ NEW: driver factory
+def create_driver():
+    driver = Driver(
+        uc=True,
+        incognito=True,
+        headless2=True
+    )
+    driver.set_page_load_timeout(30)
+    return driver
+
+
 def notify_telegram(text):
-    """Send Telegram message"""
     try:
         url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
         payload = {
@@ -53,7 +61,7 @@ def notify_telegram(text):
         }
         requests.post(url, json=payload, timeout=10)
         logger.info("Telegram notification sent")
-    except Exception as e:
+    except Exception:
         logger.exception("Telegram error")
 
 
@@ -105,16 +113,12 @@ def get_real_listings(driver):
 def monitor():
     logger.info("🚀 Initializing Ghost Monitor (Headless Mode)...")
 
-    driver = Driver(
-        uc=True,
-        incognito=True,
-        headless2=True
-    )
+    driver = create_driver()
+    loop_count = 0
 
     try:
         logger.info("🔍 Syncing existing listings...")
         initial_results = get_real_listings(driver)
-
         seen_listings = set(initial_results)
 
         if seen_listings:
@@ -123,43 +127,68 @@ def monitor():
             logger.warning("⚠️ No items found initially.")
 
         while True:
-            wait_time = random.uniform(*CHECK_INTERVAL_RANGE)
-            logger.info(f"Sleeping for {round(wait_time, 2)} seconds")
-            time.sleep(wait_time)
+            try:
+                loop_count += 1
 
-            current_results = get_real_listings(driver)
-            if not current_results:
-                logger.warning("No results returned")
-                continue
+                wait_time = random.uniform(*CHECK_INTERVAL_RANGE)
+                logger.info(f"Sleeping for {round(wait_time, 2)} seconds")
+                time.sleep(wait_time)
 
-            latest_one = current_results[0]
+                current_results = get_real_listings(driver)
+                if not current_results:
+                    logger.warning("No results returned")
+                    continue
 
-            if latest_one not in seen_listings:
-                logger.info(f"✨ NEW LISTING: {latest_one}")
+                latest_one = current_results[0]
 
-                notify_mac("Carousell: HB710 Found!", "New listing detected.")
-                notify_telegram(
-                    f"🔥 <b>HB710 Found</b>\n"
-                    f"<a href='{latest_one}'>View Listing</a>"
-                )
+                if latest_one not in seen_listings:
+                    logger.info(f"✨ NEW LISTING: {latest_one}")
 
-                seen_listings.add(latest_one)
-            else:
-                logger.info("No new listings")
+                    notify_mac("Carousell: HB710 Found!", "New listing detected.")
+                    notify_telegram(
+                        f"🔥 <b>HB710 Found</b>\n"
+                        f"<a href='{latest_one}'>View Listing</a>"
+                    )
+
+                    seen_listings.add(latest_one)
+                else:
+                    logger.info("No new listings")
+
+                # ✅ NEW: periodic driver restart (prevents crashes)
+                if loop_count % 50 == 0:
+                    logger.info("♻️ Restarting driver (prevent memory leak)")
+                    try:
+                        driver.quit()
+                    except Exception:
+                        pass
+                    driver = create_driver()
+
+            except Exception:
+                logger.exception("Driver failure detected — restarting driver")
+
+                try:
+                    driver.quit()
+                except Exception:
+                    pass
+
+                time.sleep(5)
+                driver = create_driver()
 
     except KeyboardInterrupt:
         logger.info("Stopping monitor...")
-    except Exception:
-        logger.exception("Unexpected crash in monitor()")
+
     finally:
-        driver.quit()
+        try:
+            driver.quit()
+        except Exception:
+            pass
         logger.info("Driver closed")
 
 
 if __name__ == "__main__":
     try:
         monitor()
-    except Exception as e:
+    except Exception:
         error_msg = f"❌ <b>Monitor Crashed</b>\n<pre>{traceback.format_exc()}</pre>"
         notify_telegram(error_msg)
         logger.exception("Fatal crash")
