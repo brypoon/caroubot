@@ -2,6 +2,7 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 sudo cp ~/.local/bin/uv /usr/local/bin/uv
 sudo chmod +x /usr/local/bin/uv
 uv sync
+./venv/bin/activate
 playwright install --with-deps
 
 echo "Setting up systemd service..."
