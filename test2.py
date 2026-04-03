@@ -1,7 +1,6 @@
 import os
 import time
 import random
-import subprocess
 import requests
 import logging
 import sys
@@ -34,35 +33,50 @@ console_handler.setFormatter(formatter)
 logger.addHandler(file_handler)
 logger.addHandler(console_handler)
 
+# --- TELEGRAM COOLDOWN ---
+last_alert = 0
+ALERT_COOLDOWN = 300  # seconds
+
 
 def notify_telegram(text):
     try:
         url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-        requests.post(url, json={
+        r = requests.post(url, json={
             "chat_id": CHAT_ID,
             "text": text,
             "parse_mode": "HTML"
         }, timeout=10)
-        logger.info("Telegram sent")
+
+        if r.status_code != 200:
+            logger.error(f"Telegram failed: {r.text}")
+        else:
+            logger.info("Telegram sent")
+
     except Exception:
         logger.exception("Telegram error")
 
 
-def notify_mac(title, text):
-    try:
-        cmd = f'''display notification "{text}" with title "{title}"'''
-        subprocess.call(['osascript', '-e', cmd])
-    except Exception:
-        logger.exception("Mac notify error")
+def safe_notify(msg):
+    global last_alert
+    if time.time() - last_alert > ALERT_COOLDOWN:
+        notify_telegram(msg)
+        last_alert = time.time()
+
 
 
 def clean_url(url):
     return url.split('?')[0] if url else None
 
 
-# ✅ NEW: Playwright browser factory
+# --- BROWSER FACTORY ---
 def create_browser():
     p = sync_playwright().start()
+
+    user_agents = [
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/119 Safari/537.36",
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/118 Safari/537.36"
+    ]
 
     browser = p.chromium.launch(
         headless=True,
@@ -74,18 +88,36 @@ def create_browser():
     )
 
     context = browser.new_context(
-        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36",
-        viewport={"width": 1280, "height": 800}
+        user_agent=random.choice(user_agents),
+        viewport={
+            "width": random.choice([1280, 1366, 1440]),
+            "height": random.choice([720, 800, 900])
+        },
+        locale="en-US"
     )
 
-    page = context.new_page()
+    # stealth tweak
+    context.add_init_script("""
+        Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+    """)
 
+    page = context.new_page()
     return p, browser, context, page
 
 
+# --- SCRAPER ---
 def get_real_listings(page):
     try:
         page.goto(URL, timeout=30000)
+
+        # human-like delay
+        page.mouse.move(random.randint(100, 500), random.randint(100, 500))
+        page.wait_for_timeout(random.randint(500, 1500))
+
+        content = page.content().lower()
+
+        if "carousell" not in content:
+            raise Exception("Page not loaded properly")
 
         page.wait_for_selector('div[data-testid^="listing-card"]', timeout=15000)
 
@@ -123,21 +155,43 @@ def get_real_listings(page):
         err = traceback.format_exc()
         logger.exception("Playwright scan error")
 
-        notify_telegram(
-            f"⚠️ <b>Scan Error</b>\n<pre>{err[:1000]}</pre>"
-        )
-
+        safe_notify(f"⚠️ <b>Scan Error</b>\n<pre>{err[:1000]}</pre>")
         return []
 
 
+# --- RETRY WRAPPER ---
+def get_real_listings_with_retry(page, retries=3):
+    for attempt in range(retries):
+        try:
+            results = get_real_listings(page)
+
+            if results:
+                return results
+
+            logger.warning(f"Empty result (attempt {attempt+1})")
+
+        except Exception:
+            logger.exception(f"Attempt {attempt+1} failed")
+
+        sleep_time = 2 ** attempt + random.uniform(1, 3)
+        logger.info(f"Retrying in {round(sleep_time,2)}s")
+        time.sleep(sleep_time)
+
+    return []
+
+
+# --- MAIN LOOP ---
 def monitor():
     logger.info("🚀 Starting Playwright monitor")
 
     p, browser, context, page = create_browser()
+
     loop_count = 0
+    failure_count = 0
+    MAX_FAILURES = 5
 
     try:
-        initial = get_real_listings(page)
+        initial = get_real_listings_with_retry(page)
         seen = set(initial)
 
         logger.info(f"Tracking {len(seen)} items")
@@ -150,22 +204,38 @@ def monitor():
                 logger.info(f"Sleep {round(sleep_time,2)}s")
                 time.sleep(sleep_time)
 
-                results = get_real_listings(page)
-                if not results:
-                    logger.warning("⚠️ 0 listings found")
+                results = get_real_listings_with_retry(page)
 
-                    notify_telegram(
-                      "⚠️ <b>No Listings Found</b>\nPlaywright returned 0 results"
-                    )
+                # --- FAILURE HANDLING ---
+                if not results:
+                    failure_count += 1
+                    logger.warning(f"⚠️ Empty results ({failure_count})")
+
+                    safe_notify(f"⚠️ No listings ({failure_count})")
+
+                    if failure_count >= MAX_FAILURES:
+                        logger.warning("🔥 FULL RESET")
+
+                        safe_notify("🔥 Resetting browser (failures)")
+
+                        browser.close()
+                        p.stop()
+
+                        time.sleep(random.uniform(5, 10))
+                        p, browser, context, page = create_browser()
+
+                        failure_count = 0
 
                     continue
+                else:
+                    failure_count = 0
 
+                # --- NEW LISTING DETECTION ---
                 latest = results[0]
 
                 if latest not in seen:
                     logger.info(f"✨ NEW: {latest}")
 
-                    notify_mac("Carousell Alert", "New HB710 listing")
                     notify_telegram(
                         f"🔥 <b>HB710 Found</b>\n<a href='{latest}'>View</a>"
                     )
@@ -174,7 +244,15 @@ def monitor():
                 else:
                     logger.info("No new listings")
 
-                # ✅ periodic restart (Playwright is more stable but still good practice)
+                # --- PERIODIC MAINTENANCE ---
+                if loop_count % 20 == 0:
+                    logger.info("🔄 Refreshing page")
+                    page.goto(URL, timeout=30000)
+
+                if loop_count % 50 == 0:
+                    logger.info("🧹 Clearing cookies")
+                    context.clear_cookies()
+
                 if loop_count % 100 == 0:
                     logger.info("♻️ Restarting browser")
 
@@ -185,7 +263,10 @@ def monitor():
                     p, browser, context, page = create_browser()
 
             except Exception:
+                err = traceback.format_exc()
                 logger.exception("Browser error — restarting")
+
+                safe_notify(f"❌ <b>Browser Error</b>\n<pre>{err[:1000]}</pre>")
 
                 try:
                     browser.close()
@@ -204,6 +285,7 @@ def monitor():
             pass
 
 
+# --- ENTRYPOINT ---
 if __name__ == "__main__":
     try:
         monitor()
