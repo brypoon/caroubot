@@ -148,7 +148,7 @@ def get_real_listings(page):
             except Exception:
                 continue
 
-        logger.info(f"[PW] Found {len(valid_links)} listings")
+        logger.info(f"Found {len(valid_links)} listings")
         return valid_links
 
     except Exception:
