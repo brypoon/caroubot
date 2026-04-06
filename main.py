@@ -12,7 +12,9 @@ from playwright.sync_api import sync_playwright
 # --- CONFIGURATION ---
 load_dotenv()
 URL = os.getenv("URL")
-CHECK_INTERVAL_RANGE = (20, 40)
+CHECK_INTERVAL_RANGE = (5, 20)  # seconds
+scan_failure_count = 0
+SCAN_FAILURE_THRESHOLD = 5
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
@@ -107,6 +109,8 @@ def create_browser():
 
 # --- SCRAPER ---
 def get_real_listings(page):
+    global scan_failure_count
+
     try:
         page.goto(URL, timeout=30000)
 
@@ -148,14 +152,25 @@ def get_real_listings(page):
             except Exception:
                 continue
 
+        # ✅ SUCCESS → reset counter
+        scan_failure_count = 0
+
         logger.info(f"Found {len(valid_links)} listings")
         return valid_links
 
     except Exception:
         err = traceback.format_exc()
-        logger.exception("Playwright scan error")
+        scan_failure_count += 1
 
-        safe_notify(f"⚠️ <b>Scan Error</b>\n<pre>{err[:1000]}</pre>")
+        logger.exception(f"Playwright scan error")
+
+        # ✅ Only notify after threshold reached
+        if scan_failure_count >= SCAN_FAILURE_THRESHOLD:
+            safe_notify(
+                f"⚠️ <b>Scan Error</b>\n<pre>{err[:1000]}</pre>"
+            )
+            scan_failure_count = 0  # reset after alert
+
         return []
 
 
