@@ -14,10 +14,11 @@ load_dotenv()
 URL = os.getenv("URL")
 CHECK_INTERVAL_RANGE = (5, 20)  # seconds
 scan_failure_count = 0
-SCAN_FAILURE_THRESHOLD = 5
+SCAN_FAILURE_THRESHOLD = 10
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
+SEARCH_KEYWORD = os.getenv("SEARCH_KEYWORD", "").lower()
 
 # --- LOGGING ---
 LOG_FILE = "monitor.log"
@@ -146,8 +147,14 @@ def get_real_listings(page):
                 raw = link.get_attribute("href")
                 final = clean_url(raw)
 
-                if final and ("hb710" in final.lower() or "hb710" in text.lower()):
-                    valid_links.append(final)
+                if final:
+                    if not SEARCH_KEYWORD:
+                        valid_links.append(final)
+                    else:
+                        normalized_text = text.lower().replace("-", "").replace(" ", "")
+                        if (SEARCH_KEYWORD in final.lower() or
+                            SEARCH_KEYWORD in normalized_text):
+                            valid_links.append(final)
 
             except Exception:
                 continue
@@ -203,7 +210,7 @@ def monitor():
 
     loop_count = 0
     failure_count = 0
-    MAX_FAILURES = 5
+    MAX_FAILURES = 10
 
     try:
         initial = get_real_listings_with_retry(page)
@@ -252,7 +259,7 @@ def monitor():
                     logger.info(f"✨ NEW: {latest}")
 
                     notify_telegram(
-                        f"🔥 <b>HB710 Found</b>\n<a href='{latest}'>View</a>"
+                        f"🔥 <b>New listing found</b>\n<a href='https://carousell.sg/{latest}'>View</a>"
                     )
 
                     seen.add(latest)
