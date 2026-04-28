@@ -71,6 +71,25 @@ def clean_url(url):
     return url.split('?')[0] if url else None
 
 
+def shutdown_browser(p, browser, context, page):
+    try:
+        page.close()
+    except Exception:
+        pass
+    try:
+        context.close()
+    except Exception:
+        pass
+    try:
+        browser.close()
+    except Exception:
+        pass
+    try:
+        p.stop()
+    except Exception:
+        pass
+
+
 # --- BROWSER FACTORY ---
 def create_browser():
     p = sync_playwright().start()
@@ -134,6 +153,7 @@ def get_real_listings(page):
         valid_links = []
 
         for card in cards:
+            link = None
             try:
                 text = card.inner_text()
 
@@ -158,6 +178,16 @@ def get_real_listings(page):
 
             except Exception:
                 continue
+            finally:
+                try:
+                    if link:
+                        link.dispose()
+                except Exception:
+                    pass
+                try:
+                    card.dispose()
+                except Exception:
+                    pass
 
         # ✅ SUCCESS → reset counter
         scan_failure_count = 0
@@ -240,8 +270,7 @@ def monitor():
 
                         safe_notify("🔥 Resetting browser (failures)")
 
-                        browser.close()
-                        p.stop()
+                        shutdown_browser(p, browser, context, page)
 
                         time.sleep(random.uniform(5, 10))
                         p, browser, context, page = create_browser()
@@ -278,8 +307,7 @@ def monitor():
                 if loop_count % 100 == 0:
                     logger.info("♻️ Restarting browser")
 
-                    browser.close()
-                    p.stop()
+                    shutdown_browser(p, browser, context, page)
 
                     time.sleep(2)
                     p, browser, context, page = create_browser()
@@ -291,8 +319,7 @@ def monitor():
                 safe_notify(f"❌ <b>Browser Error</b>\n<pre>{err[:1000]}</pre>")
 
                 try:
-                    browser.close()
-                    p.stop()
+                    shutdown_browser(p, browser, context, page)
                 except:
                     pass
 
@@ -301,8 +328,7 @@ def monitor():
 
     finally:
         try:
-            browser.close()
-            p.stop()
+            shutdown_browser(p, browser, context, page)
         except:
             pass
 
