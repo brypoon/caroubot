@@ -5,6 +5,8 @@ import requests
 import logging
 import sys
 import traceback
+import gc
+from collections import deque
 from logging.handlers import RotatingFileHandler
 from dotenv import load_dotenv
 from playwright.sync_api import sync_playwright
@@ -15,6 +17,8 @@ URL = os.getenv("URL")
 CHECK_INTERVAL_RANGE = (5, 20)  # seconds
 scan_failure_count = 0
 SCAN_FAILURE_THRESHOLD = 10
+MAX_SEEN_ITEMS = 1000
+GC_INTERVAL = 20
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
@@ -88,6 +92,7 @@ def shutdown_browser(p, browser, context, page):
         p.stop()
     except Exception:
         pass
+    gc.collect()
 
 
 # --- BROWSER FACTORY ---
@@ -244,7 +249,8 @@ def monitor():
 
     try:
         initial = get_real_listings_with_retry(page)
-        seen = set(initial)
+        seen_items = deque(initial, maxlen=MAX_SEEN_ITEMS)
+        seen = set(seen_items)
 
         logger.info(f"Tracking {len(seen)} items")
 
@@ -291,6 +297,10 @@ def monitor():
                         f"🔥 <b>New listing found</b>\n<a href='https://carousell.sg/{latest}'>View</a>"
                     )
 
+                    if len(seen_items) >= MAX_SEEN_ITEMS:
+                        old = seen_items.popleft()
+                        seen.discard(old)
+                    seen_items.append(latest)
                     seen.add(latest)
                 else:
                     logger.info("No new listings")
@@ -303,6 +313,10 @@ def monitor():
                 if loop_count % 50 == 0:
                     logger.info("🧹 Clearing cookies")
                     context.clear_cookies()
+
+                if loop_count % GC_INTERVAL == 0:
+                    logger.info("🧹 Running GC")
+                    gc.collect()
 
                 if loop_count % 100 == 0:
                     logger.info("♻️ Restarting browser")
