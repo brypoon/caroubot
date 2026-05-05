@@ -269,8 +269,6 @@ def monitor():
                     failure_count += 1
                     logger.warning(f"⚠️ Empty results ({failure_count})")
 
-                    safe_notify(f"⚠️ No listings ({failure_count})")
-
                     if failure_count >= MAX_FAILURES:
                         logger.warning("🔥 FULL RESET")
 
