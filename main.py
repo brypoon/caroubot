@@ -13,7 +13,10 @@ from playwright.sync_api import sync_playwright
 
 # --- CONFIGURATION ---
 load_dotenv()
-URL = os.getenv("URL")
+_url = os.getenv("URL")
+if not _url:
+    raise ValueError("URL environment variable is required but not set. Please check your .env file.")
+URL: str = _url  # Type narrowed: guaranteed to be str after validation
 CHECK_INTERVAL_RANGE = (5, 20)  # seconds
 scan_failure_count = 0
 SCAN_FAILURE_THRESHOLD = 10
