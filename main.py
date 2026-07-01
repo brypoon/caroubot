@@ -128,7 +128,11 @@ def create_browser(p) -> tuple:
         args=[
             "--disable-blink-features=AutomationControlled",
             "--no-sandbox",
-            "--disable-dev-shm-usage"
+            "--disable-dev-shm-usage",
+            "--disable-gpu",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--disable-extensions"
         ]
     )
 
@@ -161,6 +165,12 @@ def get_real_listings(page) -> list[str]:
         page.wait_for_timeout(random.randint(500, 1500))
 
         content = page.content().lower()
+
+        # Wait for Cloudflare challenge to complete if present
+        if "cloudflare" in content or "security verification" in content:
+            logger.info("Cloudflare challenge detected, waiting...")
+            page.wait_for_timeout(5000)
+            content = page.content().lower()
 
         if "carousell" not in content:
             raise Exception("Page not loaded properly")
