@@ -3,7 +3,6 @@ import time
 import random
 import requests
 import logging
-import sys
 import traceback
 import gc
 from collections import deque
@@ -18,10 +17,12 @@ if not _url:
     raise ValueError("URL environment variable is required but not set. Please check your .env file.")
 URL: str = _url  # Type narrowed: guaranteed to be str after validation
 CHECK_INTERVAL_RANGE = (5, 20)  # seconds
-scan_failure_count = 0
 SCAN_FAILURE_THRESHOLD = 10
 MAX_SEEN_ITEMS = 1000
 GC_INTERVAL = 20
+MAX_FAILURES = 10
+
+scan_failure_count = 0
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
@@ -46,62 +47,76 @@ logger.addHandler(console_handler)
 # --- TELEGRAM COOLDOWN ---
 last_alert = 0
 ALERT_COOLDOWN = 300  # seconds
+ERROR_DURATION_THRESHOLD = 300  # 5 minutes
+last_error_time = None
 
 
-def notify_telegram(text):
+def notify_telegram(text: str) -> None:
     try:
+        escaped_text = text.replace("<", "&lt;").replace(">", "&gt;")
         url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
         r = requests.post(url, json={
             "chat_id": CHAT_ID,
-            "text": text,
+            "text": escaped_text,
             "parse_mode": "HTML"
         }, timeout=10)
 
         if r.status_code != 200:
             logger.error(f"Telegram failed: {r.text}")
-        else:
-            logger.info("Telegram sent")
 
     except Exception:
         logger.exception("Telegram error")
 
 
-def safe_notify(msg):
+def safe_notify(msg: str) -> None:
     global last_alert
     if time.time() - last_alert > ALERT_COOLDOWN:
         notify_telegram(msg)
         last_alert = time.time()
 
 
+def should_alert_error() -> bool:
+    global last_error_time
+    now = time.time()
 
-def clean_url(url):
+    if last_error_time is None:
+        last_error_time = now
+        return False
+
+    error_duration = now - last_error_time
+    if error_duration >= ERROR_DURATION_THRESHOLD:
+        last_error_time = None
+        return True
+
+    return False
+
+
+def reset_error_timer() -> None:
+    global last_error_time
+    last_error_time = None
+
+
+
+def safe_close(resource) -> None:
+    try:
+        resource.close()
+    except Exception:
+        pass
+
+
+def clean_url(url: str) -> str | None:
     return url.split('?')[0] if url else None
 
 
-def shutdown_browser(p, browser, context, page):
-    try:
-        page.close()
-    except Exception:
-        pass
-    try:
-        context.close()
-    except Exception:
-        pass
-    try:
-        browser.close()
-    except Exception:
-        pass
-    try:
-        p.stop()
-    except Exception:
-        pass
+def shutdown_browser(browser, context, page) -> None:
+    safe_close(page)
+    safe_close(context)
+    safe_close(browser)
     gc.collect()
 
 
 # --- BROWSER FACTORY ---
-def create_browser():
-    p = sync_playwright().start()
-
+def create_browser(p) -> tuple:
     user_agents = [
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36",
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/119 Safari/537.36",
@@ -126,17 +141,16 @@ def create_browser():
         locale="en-US"
     )
 
-    # stealth tweak
     context.add_init_script("""
         Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
     """)
 
     page = context.new_page()
-    return p, browser, context, page
+    return browser, context, page
 
 
 # --- SCRAPER ---
-def get_real_listings(page):
+def get_real_listings(page) -> list[str]:
     global scan_failure_count
 
     try:
@@ -188,12 +202,9 @@ def get_real_listings(page):
                 continue
             finally:
                 try:
+                    card.dispose()
                     if link:
                         link.dispose()
-                except Exception:
-                    pass
-                try:
-                    card.dispose()
                 except Exception:
                     pass
 
@@ -220,7 +231,7 @@ def get_real_listings(page):
 
 
 # --- RETRY WRAPPER ---
-def get_real_listings_with_retry(page, retries=3):
+def get_real_listings_with_retry(page, retries: int = 3) -> list[str]:
     for attempt in range(retries):
         try:
             results = get_real_listings(page)
@@ -241,111 +252,113 @@ def get_real_listings_with_retry(page, retries=3):
 
 
 # --- MAIN LOOP ---
-def monitor():
+def monitor() -> None:
     logger.info("🚀 Starting Playwright monitor")
 
-    p, browser, context, page = create_browser()
+    with sync_playwright() as p:
+        browser, context, page = create_browser(p)
 
-    loop_count = 0
-    failure_count = 0
-    MAX_FAILURES = 10
+        loop_count = 0
+        failure_count = 0
 
-    try:
-        initial = get_real_listings_with_retry(page)
-        seen_items = deque(initial, maxlen=MAX_SEEN_ITEMS)
-        seen = set(seen_items)
-
-        logger.info(f"Tracking {len(seen)} items")
-
-        while True:
-            try:
-                loop_count += 1
-
-                sleep_time = random.uniform(*CHECK_INTERVAL_RANGE)
-                logger.info(f"Sleep {round(sleep_time,2)}s")
-                time.sleep(sleep_time)
-
-                results = get_real_listings_with_retry(page)
-
-                # --- FAILURE HANDLING ---
-                if not results:
-                    failure_count += 1
-                    logger.warning(f"⚠️ Empty results ({failure_count})")
-
-                    if failure_count >= MAX_FAILURES:
-                        logger.warning("🔥 FULL RESET")
-
-                        safe_notify("🔥 Resetting browser (failures)")
-
-                        shutdown_browser(p, browser, context, page)
-
-                        time.sleep(random.uniform(5, 10))
-                        p, browser, context, page = create_browser()
-
-                        failure_count = 0
-
-                    continue
-                else:
-                    failure_count = 0
-
-                # --- NEW LISTING DETECTION ---
-                latest = results[0]
-
-                if latest not in seen:
-                    logger.info(f"✨ NEW: {latest}")
-
-                    notify_telegram(
-                        f"🔥 <b>New listing found</b>\n<a href='https://carousell.sg/{latest}'>View</a>"
-                    )
-
-                    if len(seen_items) >= MAX_SEEN_ITEMS:
-                        old = seen_items.popleft()
-                        seen.discard(old)
-                    seen_items.append(latest)
-                    seen.add(latest)
-                else:
-                    logger.info("No new listings")
-
-                # --- PERIODIC MAINTENANCE ---
-                if loop_count % 20 == 0:
-                    logger.info("🔄 Refreshing page")
-                    page.goto(URL, timeout=30000)
-
-                if loop_count % 50 == 0:
-                    logger.info("🧹 Clearing cookies")
-                    context.clear_cookies()
-
-                if loop_count % GC_INTERVAL == 0:
-                    logger.info("🧹 Running GC")
-                    gc.collect()
-
-                if loop_count % 100 == 0:
-                    logger.info("♻️ Restarting browser")
-
-                    shutdown_browser(p, browser, context, page)
-
-                    time.sleep(2)
-                    p, browser, context, page = create_browser()
-
-            except Exception:
-                err = traceback.format_exc()
-                logger.exception("Browser error — restarting")
-
-                safe_notify(f"❌ <b>Browser Error</b>\n<pre>{err[:1000]}</pre>")
-
-                try:
-                    shutdown_browser(p, browser, context, page)
-                except:
-                    pass
-
-                time.sleep(5)
-                p, browser, context, page = create_browser()
-
-    finally:
         try:
-            shutdown_browser(p, browser, context, page)
-        except:
-            pass
+            initial = get_real_listings_with_retry(page)
+            seen_items = deque(initial, maxlen=MAX_SEEN_ITEMS)
+            seen = set(seen_items)
+
+            logger.info(f"Tracking {len(seen)} items")
+
+            while True:
+                try:
+                    loop_count += 1
+
+                    sleep_time = random.uniform(*CHECK_INTERVAL_RANGE)
+                    logger.info(f"Sleep {round(sleep_time,2)}s")
+                    time.sleep(sleep_time)
+
+                    results = get_real_listings_with_retry(page)
+
+                    # --- FAILURE HANDLING ---
+                    if not results:
+                        failure_count += 1
+                        logger.warning(f"⚠️ Empty results ({failure_count})")
+
+                        if failure_count >= MAX_FAILURES:
+                            logger.warning("🔥 FULL RESET")
+
+                            safe_notify("🔥 Resetting browser (failures)")
+
+                            shutdown_browser(browser, context, page)
+
+                            time.sleep(random.uniform(5, 10))
+                            browser, context, page = create_browser(p)
+
+                            failure_count = 0
+
+                        continue
+                    else:
+                        failure_count = 0
+                        reset_error_timer()
+
+                    # --- NEW LISTING DETECTION ---
+                    latest = results[0]
+
+                    if latest not in seen:
+                        logger.info(f"✨ NEW: {latest}")
+
+                        notify_telegram(
+                            f"🔥 <b>New listing found</b>\n<a href='https://carousell.sg/{latest}'>View</a>"
+                        )
+
+                        if len(seen_items) >= MAX_SEEN_ITEMS:
+                            old = seen_items.popleft()
+                            seen.discard(old)
+                        seen_items.append(latest)
+                        seen.add(latest)
+                    else:
+                        logger.info("No new listings")
+
+                    # --- PERIODIC MAINTENANCE ---
+                    if loop_count % 20 == 0:
+                        logger.info("🔄 Refreshing page")
+                        page.goto(URL, timeout=30000)
+
+                    if loop_count % 50 == 0:
+                        logger.info("🧹 Clearing cookies")
+                        context.clear_cookies()
+
+                    if loop_count % GC_INTERVAL == 0:
+                        logger.info("🧹 Running GC")
+                        gc.collect()
+
+                    if loop_count % 100 == 0:
+                        logger.info("♻️ Restarting browser")
+
+                        shutdown_browser(browser, context, page)
+
+                        time.sleep(2)
+                        browser, context, page = create_browser(p)
+
+                except Exception:
+                    err = traceback.format_exc()
+                    logger.exception("Browser error — restarting")
+
+                    if should_alert_error():
+                        safe_notify(f"❌ <b>Browser Error (5+ min)</b>\n<pre>{err[:1000]}</pre>")
+
+                    try:
+                        shutdown_browser(browser, context, page)
+                    except Exception:
+                        pass
+
+                    time.sleep(5)
+                    browser, context, page = create_browser(p)
+
+        finally:
+            try:
+                shutdown_browser(browser, context, page)
+            except Exception:
+                pass
 
 
 # --- ENTRYPOINT ---
@@ -356,4 +369,3 @@ if __name__ == "__main__":
         msg = f"❌ <b>Crash</b>\n<pre>{traceback.format_exc()}</pre>"
         notify_telegram(msg)
         logger.exception("Fatal crash")
-        sys.exit(1)
