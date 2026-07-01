@@ -165,10 +165,17 @@ def get_real_listings(page) -> list[str]:
         if "carousell" not in content:
             raise Exception("Page not loaded properly")
 
-        page.wait_for_selector('div[data-testid^="listing-card"]', timeout=15000)
+        try:
+            page.wait_for_selector('div[data-testid^="listing-card"]', timeout=20000)
+        except Exception as e:
+            logger.warning(f"Selector timeout, checking page content...")
+            page_text = page.inner_text("body")[:500]
+            logger.warning(f"Page snippet: {page_text}")
+            raise
 
-        page.mouse.wheel(0, 2000)
-        page.wait_for_timeout(2000)
+        page.wait_for_timeout(1000)
+        page.mouse.wheel(0, 1500)
+        page.wait_for_timeout(1500)
 
         cards = page.query_selector_all('div[data-testid^="listing-card"]')
 
