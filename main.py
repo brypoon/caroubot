@@ -6,7 +6,9 @@ import logging
 import traceback
 import gc
 from collections import deque
+from html import escape
 from logging.handlers import RotatingFileHandler
+from urllib.parse import urljoin
 from dotenv import load_dotenv
 from playwright.sync_api import sync_playwright
 
@@ -53,11 +55,10 @@ last_error_time = None
 
 def notify_telegram(text: str) -> None:
     try:
-        escaped_text = text.replace("<", "&lt;").replace(">", "&gt;")
         url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
         r = requests.post(url, json={
             "chat_id": CHAT_ID,
-            "text": escaped_text,
+            "text": text,
             "parse_mode": "HTML"
         }, timeout=10)
 
@@ -154,7 +155,7 @@ def create_browser(p) -> tuple:
 
 
 # --- SCRAPER ---
-def get_real_listings(page) -> list[str]:
+def get_real_listings(page) -> list[str] | None:
     global scan_failure_count
 
     try:
@@ -178,9 +179,14 @@ def get_real_listings(page) -> list[str]:
         try:
             page.wait_for_selector('div[data-testid^="listing-card"]', timeout=20000)
         except Exception as e:
+            page_text = page.inner_text("body")
             logger.warning(f"Selector timeout, checking page content...")
-            page_text = page.inner_text("body")[:500]
-            logger.warning(f"Page snippet: {page_text}")
+            logger.warning(f"Page snippet: {page_text[:500]}")
+            no_results_phrases = ["no results", "we couldn't find", "0 results", "nothing here"]
+            if any(phrase in page_text.lower() for phrase in no_results_phrases):
+                logger.info("Page loaded but no listings match the filters")
+                scan_failure_count = 0
+                return []
             raise
 
         page.wait_for_timeout(1000)
@@ -240,23 +246,24 @@ def get_real_listings(page) -> list[str]:
         # ✅ Only notify after threshold reached
         if scan_failure_count >= SCAN_FAILURE_THRESHOLD:
             safe_notify(
-                f"⚠️ <b>Scan Error</b>\n<pre>{err[:1000]}</pre>"
+                f"⚠️ <b>Scan Error</b>\n<pre>{escape(err[:1000])}</pre>"
             )
             scan_failure_count = 0  # reset after alert
 
-        return []
+        return None
 
 
 # --- RETRY WRAPPER ---
-def get_real_listings_with_retry(page, retries: int = 3) -> list[str]:
+def get_real_listings_with_retry(page, retries: int = 3) -> list[str] | None:
     for attempt in range(retries):
         try:
             results = get_real_listings(page)
 
-            if results:
+            # None means scraping failed; [] means page loaded but no listings
+            if results is None:
+                logger.warning(f"Scrape failed (attempt {attempt+1})")
+            else:
                 return results
-
-            logger.warning(f"Empty result (attempt {attempt+1})")
 
         except Exception:
             logger.exception(f"Attempt {attempt+1} failed")
@@ -265,7 +272,7 @@ def get_real_listings_with_retry(page, retries: int = 3) -> list[str]:
         logger.info(f"Retrying in {round(sleep_time,2)}s")
         time.sleep(sleep_time)
 
-    return []
+    return None
 
 
 # --- MAIN LOOP ---
@@ -279,7 +286,7 @@ def monitor() -> None:
         failure_count = 0
 
         try:
-            initial = get_real_listings_with_retry(page)
+            initial = get_real_listings_with_retry(page) or []
             seen_items = deque(initial, maxlen=MAX_SEEN_ITEMS)
             seen = set(seen_items)
 
@@ -296,9 +303,9 @@ def monitor() -> None:
                     results = get_real_listings_with_retry(page)
 
                     # --- FAILURE HANDLING ---
-                    if not results:
+                    if results is None:
                         failure_count += 1
-                        logger.warning(f"⚠️ Empty results ({failure_count})")
+                        logger.warning(f"⚠️ Scrape failed ({failure_count})")
 
                         if failure_count >= MAX_FAILURES:
                             logger.warning("🔥 FULL RESET")
@@ -317,14 +324,19 @@ def monitor() -> None:
                         failure_count = 0
                         reset_error_timer()
 
+                    if not results:
+                        logger.info("No listings match current filters")
+                        continue
+
                     # --- NEW LISTING DETECTION ---
                     latest = results[0]
 
                     if latest not in seen:
                         logger.info(f"✨ NEW: {latest}")
 
+                        listing_url = urljoin("https://carousell.sg", latest)
                         notify_telegram(
-                            f"🔥 <b>New listing found</b>\n<a href='https://carousell.sg/{latest}'>View</a>"
+                            f'🔥 <b>New listing found</b>\n<a href="{escape(listing_url, quote=True)}">View</a>'
                         )
 
                         if len(seen_items) >= MAX_SEEN_ITEMS:
@@ -361,7 +373,7 @@ def monitor() -> None:
                     logger.exception("Browser error — restarting")
 
                     if should_alert_error():
-                        safe_notify(f"❌ <b>Browser Error (5+ min)</b>\n<pre>{err[:1000]}</pre>")
+                        safe_notify(f"❌ <b>Browser Error (5+ min)</b>\n<pre>{escape(err[:1000])}</pre>")
 
                     try:
                         shutdown_browser(browser, context, page)
@@ -383,6 +395,6 @@ if __name__ == "__main__":
     try:
         monitor()
     except Exception:
-        msg = f"❌ <b>Crash</b>\n<pre>{traceback.format_exc()}</pre>"
+        msg = f"❌ <b>Crash</b>\n<pre>{escape(traceback.format_exc())}</pre>"
         notify_telegram(msg)
         logger.exception("Fatal crash")
